@@ -164,7 +164,7 @@ Files and directories **must** be specified with `-f` or `-d` flags. Positional 
 | Value | Behaviour |
 |-------|-----------|
 | `.` | Current directory only, non-recursive |
-| `*` | All non-hidden directories, recursively |
+| `*` | The whole tree recursively — all non-hidden directories plus the top-level files of `.` |
 | `.*` | All hidden directories, recursively |
 | `migration*/` | All directories whose name matches the glob |
 

@@ -1,11 +1,16 @@
 #!/bin/bash
 # =============================================================================
 # lscat - List and concatenate directory/file contents with advanced options
-# Version: 1.7.5 (FIXED: prune skipped dirs at find level)
+# Version: 1.7.7 (FIXED: -d "*" no longer repeats every nested subtree and
+# now also processes top-level files, deterministic C-sorted listings,
+# File-Contents summary lines kept out of -D output files)
+# 1.7.6: infinite tree recursion, -d . non-recursive, tree lists files,
+# -D output un-polluted of Info lines, eval-free find, space-safe dedup,
+# slashed glob fallback
 # License: Custom (see LICENSE file)
 # Repository: https://github.com/lionel-hue/LSCAT
 # =============================================================================
-VERSION="1.7.5"
+VERSION="1.7.7"
 SCRIPT_NAME=$(basename "$0")
 
 # Default values
@@ -149,10 +154,11 @@ fi
 }
 
 print_info() {
+# Status lines go to stderr: they must never land inside -D output files.
 if [[ "$WRITING_TO_FILE" == false ]]; then
-echo -e "${CYAN}Info:${NC} $1"
+echo -e "${CYAN}Info:${NC} $1" >&2
 else
-echo "Info: $1"
+echo "Info: $1" >&2
 fi
 }
 
@@ -276,6 +282,10 @@ expanded_items+=("$found_item")
 fi
 done < <(find . -mindepth 1 -type d -not -name '.*' -print0 2>/dev/null)
 fi
+# "*" means the whole tree: also add "." so top-level files are processed
+# too (without this, files outside every subdirectory silently vanished
+# from -d "*" output — incl. a root README or package config).
+expanded_items+=(".")
 elif [[ "$item" == "." ]] && [[ "$POSITIONAL_DIRECTORIES" == false ]]; then
 expanded_items+=(".")
 elif [[ "$item" == ".*" ]]; then
@@ -307,18 +317,25 @@ if [[ ${#found_items[@]} -eq 0 ]]; then
 local pattern_name=$(basename "$item")
 local pattern_dir=$(dirname "$item")
 [[ "$pattern_dir" == "." ]] && pattern_dir="."
-if [[ "$item" == */ ]]; then
+if [[ "$pattern_dir" == "." ]] || [[ -d "$pattern_dir" ]]; then
+# directory part is the cwd or a real directory: search there
 while IFS= read -r -d $'\0' found_item; do
 if [[ -d "$found_item" ]]; then
 found_items+=("$found_item")
 fi
 done < <(find "$pattern_dir" -type d -name "$pattern_name" -print0 2>/dev/null)
 else
+# pattern like "*/nested" / "sub/*/dir": the dirname part is not a
+# real directory, so anchor the search at the tree root instead of
+# silently returning nothing.
 while IFS= read -r -d $'\0' found_item; do
 if [[ -d "$found_item" ]]; then
 found_items+=("$found_item")
 fi
-done < <(find "$pattern_dir" -type d -name "$pattern_name" -print0 2>/dev/null)
+done < <(find . -mindepth 2 -type d -name "$pattern_name" -print0 2>/dev/null)
+if [[ ${#found_items[@]} -eq 0 ]]; then
+print_warning "No directory matches pattern: $item"
+fi
 fi
 fi
 for found_item in "${found_items[@]}"; do
@@ -326,27 +343,32 @@ expanded_items+=("$found_item")
 done
 fi
 else
-if [[ -d "$item" ]]; then
+# Keep non-glob items in the stream even when they do not exist:
+# the validation pass is the single authority that warns or errors
+# on them (reporting from inside this subshell would vanish with it,
+# and "-d no/such/dir" must still exit non-zero for pipelines).
 expanded_items+=("$item")
-elif [[ -e "$item" ]]; then
-print_warning "Skipping non-directory item in -d flag: $item"
-else
-print_error "Directory not found: $item"
-return 1
-fi
 fi
 done
+# Dedup via associative array keyed on the ./-stripped path: substring
+# matching (the old "${unique_items[@]}" regex) treated "dir" as a duplicate
+# of "test dir", and "./x" vs "x" forms of the same directory both survived,
+# getting processed twice.
+local -A seen_items=()
 local unique_items=()
+local dedup_key
 for item in "${expanded_items[@]}"; do
-if [[ -n "$item" ]] && [[ ! " ${unique_items[@]} " =~ " $item " ]]; then
+[[ -n "$item" ]] || continue
+dedup_key="${item#./}"
+dedup_key="${dedup_key%/}"
+[[ -n "${seen_items[$dedup_key]:-}" ]] && continue
+seen_items[$dedup_key]=1
 unique_items+=("$item")
-fi
 done
 for item in "${unique_items[@]}"; do
 echo "$item"
 done
 }
-
 # Enhanced file pattern expansion function (FILES ONLY - non-recursive)
 expand_file_patterns() {
 local items=("$@")
@@ -376,7 +398,7 @@ elif [[ "$item" == *"*"* ]] || [[ "$item" == *"?"* ]] || [[ "$item" == *"["* ]];
 local pattern_name=$(basename "$item")
 local pattern_dir=$(dirname "$item")
 [[ "$pattern_dir" == "." ]] && pattern_dir="."
-if [[ -d "$pattern_dir" ]] || [[ "$pattern_dir" == "" ]]; then
+if [[ -d "$pattern_dir" ]] || [[ "$pattern_dir" == "." ]]; then
 if [[ "$INCLUDE_HIDDEN" == true ]]; then
 while IFS= read -r -d $'\0' found_item; do
 if [[ -f "$found_item" ]]; then
@@ -390,22 +412,37 @@ expanded_items+=("$found_item")
 fi
 done < <(find "$pattern_dir" -maxdepth 1 -type f -name "$pattern_name" -not -name '.*' -print0 2>/dev/null)
 fi
+else
+# Pattern like "src/*/x.js" where the dirname part is not a real
+# directory: match the basename from the tree root at any depth
+# instead of silently returning nothing.
+while IFS= read -r -d $'\0' found_item; do
+if [[ -f "$found_item" ]] && [[ ! "$(basename "$found_item")" == .* ]]; then
+expanded_items+=("$found_item")
+fi
+done < <(find . -mindepth 2 -type f -name "$pattern_name" -not -name '.*' -print0 2>/dev/null)
+if [[ ${#expanded_items[@]} -eq 0 ]]; then
+print_warning "No file matches pattern: $item"
+fi
 fi
 else
-if [[ -f "$item" ]]; then
+# Same as expand_patterns: leave the item in the stream; the
+# validation pass prints "File not found" exactly once.
 expanded_items+=("$item")
-elif [[ -e "$item" ]]; then
-print_warning "Skipping non-file item in -f flag: $item"
-else
-print_warning "File not found: $item (skipping)"
-fi
 fi
 done
+# Dedup via associative array on the ./-stripped path (space-safe; "./x"
+# and "x" collapse to one entry so a file cannot be processed twice).
+local -A seen_items=()
 local unique_items=()
+local dedup_key
 for item in "${expanded_items[@]}"; do
-if [[ -n "$item" ]] && [[ ! " ${unique_items[@]} " =~ " $item " ]]; then
+[[ -n "$item" ]] || continue
+dedup_key="${item#./}"
+dedup_key="${dedup_key%/}"
+[[ -n "${seen_items[$dedup_key]:-}" ]] && continue
+seen_items[$dedup_key]=1
 unique_items+=("$item")
-fi
 done
 for item in "${unique_items[@]}"; do
 echo "$item"
@@ -413,58 +450,66 @@ done
 }
 
 # =============================================================================
-# KEY FIX: Build find command with -prune for skipped directories
+# KEY FIX: Build find arguments with -prune for skipped directories
+# -mindepth 1 is always applied: find otherwise reports the starting point
+# itself, which once made the tree walk recurse into "./" forever.
+# Arguments are returned through the global FIND_ARGS array (never eval'd),
+# so names containing spaces, quotes, backslashes or '$' stay safe.
 # =============================================================================
+FIND_ARGS=()
+
 build_find_cmd() {
 local base_dir="$1"
-local find_type="${2:-f}"
-local maxdepth="${3:-}"
-local include_hidden="${4:-false}"
-local is_hidden_parent="${5:-false}"
+local find_type="${2-f}"   # empty string means: no -type filter (files and dirs)
+local maxdepth="${3-}"
+local include_hidden="${4-false}"
+local is_hidden_parent="${5-false}"
 
-local cmd="find \"$base_dir\""
-[[ -n "$maxdepth" ]] && cmd+=" $maxdepth"
+FIND_ARGS=(find "$base_dir")
+# maxdepth arrives as a string like "-maxdepth 1": word-split it into argv.
+[[ -n "$maxdepth" ]] && FIND_ARGS+=($maxdepth)
+FIND_ARGS+=(-mindepth 1)
 
-local prune_parts=()
+local -a prune_expr=()
 
 for pattern in "${SKIP_DIRS[@]}"; do
     pattern="${pattern%/}"
     [[ -z "$pattern" ]] && continue
     local clean_pattern="${pattern#./}"
 
+    if [[ ${#prune_expr[@]} -gt 0 ]]; then
+        prune_expr+=(-o)
+    fi
+
     if [[ "$pattern" == /* ]]; then
-        prune_parts+=("-path \"$pattern\"")
+        prune_expr+=(-path "$pattern")
     elif [[ "$clean_pattern" == */* ]]; then
-        prune_parts+=("-path \"*/${clean_pattern}\"")
+        prune_expr+=(-path "*/${clean_pattern}")
     else
-        prune_parts+=("-name \"$clean_pattern\"")
+        prune_expr+=(-name "$clean_pattern")
     fi
 done
 
 if [[ "$include_hidden" == false ]] && [[ "$is_hidden_parent" == false ]]; then
-    prune_parts+=("-name '.*'")
+    if [[ ${#prune_expr[@]} -gt 0 ]]; then
+        prune_expr+=(-o)
+    fi
+    prune_expr+=(-name ".*")
 fi
 
-if [[ ${#prune_parts[@]} -gt 0 ]]; then
-    local prune_expr="${prune_parts[0]}"
-    for (( j=1; j<${#prune_parts[@]}; j++ )); do
-        prune_expr+=" -o ${prune_parts[$j]}"
-    done
-
+if [[ ${#prune_expr[@]} -gt 0 ]]; then
+    # Array form needs no shell escapes: pass "(" ")" verbatim as arguments.
+    FIND_ARGS+=("(" "${prune_expr[@]}" ")" -prune -o)
     if [[ -n "$find_type" ]]; then
-        cmd+=" \( ${prune_expr} \) -prune -o -type ${find_type} -print"
-    else
-        cmd+=" \( ${prune_expr} \) -prune -o -mindepth 1 -print"
+        FIND_ARGS+=(-type "$find_type")
     fi
+    FIND_ARGS+=(-print)
 else
     if [[ -n "$find_type" ]]; then
-        cmd+=" -type ${find_type} -print"
-    else
-        cmd+=" -mindepth 1 -print"
+        FIND_ARGS+=(-type "$find_type")
     fi
+    FIND_ARGS+=(-print)
 fi
-
-echo "$cmd"
 }
 
 should_skip_dir() {
@@ -630,6 +675,8 @@ echo "$result"
 
 # =============================================================================
 # FIXED: Tree structure with prune-aware find
+# FIXES: -mindepth 1 (no self-recursion), files now listed, last visible item
+# gets the corner connector even after filters, NON_RECURSIVE decided by caller
 # =============================================================================
 get_tree_structure() {
 local dir="$1"
@@ -639,22 +686,22 @@ local recursive="${4:-true}"
 local parent_is_hidden="${5:-false}"
 local force_show_hidden="${6:-false}"
 
-if [[ "$NON_RECURSIVE" == true ]]; then
-recursive=false
-fi
-
 if should_skip_dir "$dir"; then
 if [[ $depth -eq 0 ]]; then
 [[ "$WRITING_TO_FILE" == false ]] && echo -e "${YELLOW}📁 $dir (skipped)${NC}" || echo "📁 $dir (skipped)"
 else
-echo "${prefix}📁 $(basename "$dir")/ (skipped)"
+echo "${prefix}(skipped)"
 fi
 return
 fi
 
 local dir_name=$(basename "$dir")
+# "." is the cwd, not a hidden directory: basename just matches ".*".
+if [[ "$dir" != "." ]] && [[ "$dir_name" == .* ]]; then
+local is_current_hidden=true
+else
 local is_current_hidden=false
-[[ "$dir_name" == .* ]] && is_current_hidden=true
+fi
 
 if [[ "$force_show_hidden" == false ]] && [[ "$INCLUDE_HIDDEN" == false ]] && \
 [[ "$is_current_hidden" == true ]] && [[ "$parent_is_hidden" == false ]]; then
@@ -663,39 +710,47 @@ fi
 
 if [[ $depth -eq 0 ]]; then
 [[ "$WRITING_TO_FILE" == false ]] && echo -e "${BOLD}${BLUE}📁 $dir${NC}" || echo "📁 $dir"
-else
-echo "${prefix}📁 $dir_name/"
 fi
+# depth>0 adds no extra header: the parent's "└── name/" line already
+# labels the subdirectory (keeps trees identical to the readme sample).
+# Collect the visible entries first (skip-filtered), so the tree corner
 
-# Build find command with pruning for skipped directories
+# Collect the visible entries first (skip-filtered), so the tree corner
+# connector lands on the truly last displayed item.
 local find_opts="-maxdepth 1"
-local find_cmd
-find_cmd=$(build_find_cmd "$dir" "d" "$find_opts" "$INCLUDE_HIDDEN" "$is_current_hidden")
-
-local count=0
-local total_items=0
-while IFS= read -r item; do
-[[ -z "$item" ]] && continue
-total_items=$((total_items + 1))
-done < <(eval "$find_cmd 2>/dev/null")
-
+local -a visible_items=()
+local item
 while IFS= read -r item; do
 [[ -z "$item" ]] && continue
 local item_name=$(basename "$item")
 local is_item_hidden=false
 [[ "$item_name" == .* ]] && is_item_hidden=true
 
-# Double-check skip (prune handles most, but extra safety)
+if [[ "$force_show_hidden" == false ]] && [[ "$INCLUDE_HIDDEN" == false ]] && \
+[[ "$is_item_hidden" == true ]] && [[ "$is_current_hidden" == false ]]; then
+continue
+fi
+
 if [[ -d "$item" ]]; then
 should_skip_dir "$item" && continue
 else
 should_skip_file "$item" && continue
 fi
 
-if [[ "$force_show_hidden" == false ]] && [[ "$INCLUDE_HIDDEN" == false ]] && \
-[[ "$is_item_hidden" == true ]] && [[ "$is_current_hidden" == false ]]; then
-continue
-fi
+# A -D destination is never drawn into the listing it is written into
+# (it must not appear in the tree it contains). LSCAT-10.
+is_output_file "$item" && continue
+
+visible_items+=("$item")
+done < <(
+{ build_find_cmd "$dir" "" "$find_opts" "$INCLUDE_HIDDEN" "$is_current_hidden"; "${FIND_ARGS[@]}" 2>/dev/null; } \
+| LC_ALL=C sort # deterministic listings: find returns fs entry (creation) order
+)
+
+local count=0
+local total_items=${#visible_items[@]}
+for item in "${visible_items[@]}"; do
+local item_name=$(basename "$item")
 
 count=$((count + 1))
 local next_prefix="$prefix"
@@ -727,13 +782,14 @@ else
 echo "$item_name"
 fi
 fi
-done < <(eval "$find_cmd 2>/dev/null")
+done
 
 [[ $count -eq 0 ]] && echo "${prefix} (empty)"
 }
 
 # =============================================================================
 # FIXED: LS structure with prune-aware find
+# FIXES: -mindepth 1 (no base-dir echo), array find, empty-marker indent
 # =============================================================================
 get_ls_structure() {
 local dir="$1"
@@ -741,10 +797,6 @@ local depth="${2:-0}"
 local recursive="${3:-true}"
 local parent_is_hidden="${4:-false}"
 local force_show_hidden="${5:-false}"
-
-if [[ "$NON_RECURSIVE" == true ]]; then
-recursive=false
-fi
 
 if should_skip_dir "$dir"; then
 if [[ $depth -eq 0 ]]; then
@@ -754,8 +806,12 @@ return
 fi
 
 local dir_name=$(basename "$dir")
+# "." is the cwd, not a hidden directory: basename just matches ".*".
+if [[ "$dir" != "." ]] && [[ "$dir_name" == .* ]]; then
+local is_current_hidden=true
+else
 local is_current_hidden=false
-[[ "$dir_name" == .* ]] && is_current_hidden=true
+fi
 
 if [[ "$force_show_hidden" == false ]] && [[ "$INCLUDE_HIDDEN" == false ]] && \
 [[ "$is_current_hidden" == true ]] && [[ "$parent_is_hidden" == false ]]; then
@@ -770,18 +826,21 @@ elif [[ $depth -eq 0 ]]; then
 [[ "$WRITING_TO_FILE" == false ]] && echo -e "${BOLD}${BLUE}📁 $dir${NC}" || echo "📁 $dir"
 fi
 
-# Build find command with pruning
+# Build find arguments with pruning
 local find_opts="-maxdepth 1"
-local find_cmd
-find_cmd=$(build_find_cmd "$dir" "" "$find_opts" "$INCLUDE_HIDDEN" "$is_current_hidden")
-
 local files=()
 local subdirs=()
+local item
 while IFS= read -r item; do
 [[ -z "$item" ]] && continue
 local item_name=$(basename "$item")
 local is_item_hidden=false
 [[ "$item_name" == .* ]] && is_item_hidden=true
+
+if [[ "$force_show_hidden" == false ]] && [[ "$INCLUDE_HIDDEN" == false ]] && \
+[[ "$is_item_hidden" == true ]] && [[ "$is_current_hidden" == false ]]; then
+continue
+fi
 
 if [[ -d "$item" ]]; then
 should_skip_dir "$item" && continue
@@ -789,13 +848,15 @@ else
 should_skip_file "$item" && continue
 fi
 
-if [[ "$force_show_hidden" == false ]] && [[ "$INCLUDE_HIDDEN" == false ]] && \
-[[ "$is_item_hidden" == true ]] && [[ "$is_current_hidden" == false ]]; then
-continue
-fi
+# Same destination exclusion as the tree: a -D file is never listed in
+# the ls/ls-R structure it is being written into. LSCAT-10.
+is_output_file "$item" && continue
 
 [[ -d "$item" ]] && subdirs+=("$item") || files+=("$item")
-done < <(eval "$find_cmd 2>/dev/null")
+done < <(
+{ build_find_cmd "$dir" "" "$find_opts" "$INCLUDE_HIDDEN" "$is_current_hidden"; "${FIND_ARGS[@]}" 2>/dev/null; } \
+| LC_ALL=C sort # deterministic listings: find returns fs entry (creation) order
+)
 
 for item in "${files[@]}"; do
 local item_name=$(basename "$item")
@@ -830,7 +891,11 @@ fi
 done
 
 if [[ ${#files[@]} -eq 0 ]] && [[ ${#subdirs[@]} -eq 0 ]]; then
-[[ "$HEADER_TYPE" == "ls-R" && $depth -gt 0 ]] && echo "${indent} (empty)" || echo " (empty)"
+if [[ "$HEADER_TYPE" == "ls-R" && $depth -gt 0 ]]; then
+echo "${indent}(empty)"
+else
+echo "(empty)"
+fi
 fi
 
 [[ "$HEADER_TYPE" == "ls-R" && $depth -eq 0 && ${#subdirs[@]} -gt 0 ]] && echo ""
@@ -880,8 +945,15 @@ return
 fi
 
 if [[ "$force_show_hidden" == false ]] && [[ "$INCLUDE_HIDDEN" == false ]] && \
-[[ "$is_dir_hidden" == true ]] && [[ "$dir" != "." ]] && [[ ! " ${DIRECTORIES[@]} " =~ " $dir " ]]; then
-return
+[[ "$is_dir_hidden" == true ]] && [[ "$dir" != "." ]]; then
+# Hidden dirs stay hidden unless -a/-f named them explicitly.
+local dir_norm="${dir#./}"
+local is_listed=false
+local listed_dir
+for listed_dir in "${DIRECTORIES[@]}"; do
+[[ "${listed_dir#./}" == "$dir_norm" ]] && { is_listed=true; break; }
+done
+[[ "$is_listed" == false ]] && return
 fi
 
 # Print directory structure header
@@ -911,9 +983,6 @@ if [[ "$show_file_contents" == true ]]; then
 local find_maxdepth=""
 [[ "$NON_RECURSIVE" == true && "$dir" == "." ]] && find_maxdepth="-maxdepth 1"
 
-local find_cmd
-find_cmd=$(build_find_cmd "$dir" "f" "$find_maxdepth" "$INCLUDE_HIDDEN" "$is_dir_hidden")
-
 local file_count=0
 while IFS= read -r file; do
 [[ -z "$file" ]] && continue
@@ -924,14 +993,31 @@ if [[ "$force_show_hidden" == false ]] && [[ "$INCLUDE_HIDDEN" == false ]] && [[
 continue
 fi
 
+# Destination files must never be scanned into themselves.
+if is_output_file "$file"; then
+continue
+fi
+
 process_file_content "$file"
 file_count=$((file_count + 1))
-done < <(eval "$find_cmd 2>/dev/null")
+done < <(
+{ build_find_cmd "$dir" "f" "$find_maxdepth" "$INCLUDE_HIDDEN" "$is_dir_hidden"; "${FIND_ARGS[@]}" 2>/dev/null; } \
+| LC_ALL=C sort
+)
 
 if [[ $file_count -eq 0 ]]; then
+if [[ "$WRITING_TO_FILE" == true ]]; then
+# Summary/status lines must never land inside -D output files.
+echo "No files found to process in this directory." >&2
+else
 echo -e "\nNo files found to process in this directory."
+fi
+else
+if [[ "$WRITING_TO_FILE" == true ]]; then
+echo "Processed $file_count files from $dir" >&2
 else
 echo -e "\nProcessed $file_count files from $dir"
+fi
 fi
 fi
 }
@@ -940,6 +1026,9 @@ process_single_file() {
 local file="$1"
 if should_skip_file "$file"; then
 print_warning "Skipping file: $file"
+return
+fi
+if is_output_file "$file"; then
 return
 fi
 print_info "Processing single file: $file"
@@ -1048,6 +1137,14 @@ DIRECTORIES=(".")
 POSITIONAL_DIRECTORIES=true
 fi
 
+# "-d ." means the current directory only (non-recursive tree, top-level files).
+# The flag used to exist but was never set, so "." silently recursed everything.
+for dir in "${DIRECTORIES[@]}"; do
+if [[ "$dir" == "." ]]; then
+NON_RECURSIVE=true
+fi
+done
+
 # Expand patterns for directories and files
 if [[ ${#DIRECTORIES[@]} -gt 0 ]]; then
 temp_dirs=()
@@ -1069,7 +1166,93 @@ done
 FILES=("${temp_files[@]}")
 fi
 
+# Per-value expansion dedups only inside one pattern call, so "dir" and
+# "./dir" (or "*.md" and "x.md" from separate values) can still arrive as
+# distinct entries through distinct expand_patterns/expand_file_patterns
+# calls. One global collapse makes every real path process exactly once.
+collapse_forms() {
+local -A seen=()
+local item key
+local out=()
+for item in "$@"; do
+[[ -n "$item" ]] || continue
+key="${item#./}"
+key="${key%/}"
+[[ -n "${seen[$key]:-}" ]] && continue
+seen[$key]=1
+out+=("$item")
+done
+if [[ ${#out[@]} -gt 0 ]]; then printf '%s\n' "${out[@]}"; fi
+}
+if [[ ${#DIRECTORIES[@]} -gt 0 ]]; then
+mapfile -t DIRECTORIES < <(collapse_forms "${DIRECTORIES[@]}")
+fi
+
+# A root nested inside another root repeats its whole subtree: "-d *"
+# expands every descendant directory, so "docs" and "docs/deep" (and
+# "docs/deep/..." etc.) were each processed as a separate recursive root
+# and all their files were concatenated once per level. Keep only the
+# top-most roots; a recursive walk of a parent always covers its subdirs.
+prune_contained_dirs() {
+local -a keep=()
+local a b ka kb contained
+for a in "$@"; do
+ka="${a#./}"; ka="${ka%/}"
+[[ -z "$ka" ]] && ka="."
+contained=false
+for b in "$@"; do
+[[ "$a" == "$b" ]] && continue
+kb="${b#./}"; kb="${kb%/}"
+[[ -z "$kb" ]] && kb="."
+# "." is an ancestor of everything; contained paths are the literal subtree.
+if [[ "$kb" == "." ]] || [[ "$ka" == "$kb"/* ]]; then
+contained=true
+break
+fi
+done
+[[ "$contained" == true ]] || keep+=("$a")
+done
+for a in "${keep[@]}"; do
+echo "$a"
+done
+}
+if [[ ${#DIRECTORIES[@]} -gt 1 ]]; then
+mapfile -t DIRECTORIES < <(prune_contained_dirs "${DIRECTORIES[@]}")
+fi
+if [[ ${#FILES[@]} -gt 0 ]]; then
+mapfile -t FILES < <(collapse_forms "${FILES[@]}")
+fi
+
+is_output_file() {
+# true when $1 is one of the -D destinations (never extract a destination
+# into itself: "-d . -D out.txt" would otherwise read its own half-written
+# content).
+local probe="${1#./}"
+for out_file in "${OUTPUT_FILES[@]}"; do
+[[ "$probe" == "${out_file#./}" ]] && return 0
+done
+return 1
+}
+
+# Drop any destination that made it into the request lists.
+for out_file in "${OUTPUT_FILES[@]}"; do
+out_norm="${out_file#./}"
+keep_dirs=()
+for dir in "${DIRECTORIES[@]}"; do
+dir_norm="${dir#./}"
+[[ "$dir_norm" == "$out_norm" ]] || keep_dirs+=("$dir")
+done
+DIRECTORIES=("${keep_dirs[@]}")
+keep_files=()
+for file in "${FILES[@]}"; do
+file_norm="${file#./}"
+[[ "$file_norm" == "$out_norm" ]] || keep_files+=("$file")
+done
+FILES=("${keep_files[@]}")
+done
+
 # Validate inputs
+HAD_ERRORS=0
 VALID_DIRECTORIES=()
 VALID_FILES=()
 for dir in "${DIRECTORIES[@]}"; do
@@ -1079,6 +1262,7 @@ elif [[ -f "$dir" ]]; then
 print_warning "Directory expected but found file in -d flag: $dir (use -f for files)"
 else
 print_error "Directory not found: $dir"
+HAD_ERRORS=1
 fi
 done
 
@@ -1091,6 +1275,11 @@ else
 print_warning "File not found: $file (skipping)"
 fi
 done
+
+# Stop on hard input errors so pipelines trust the exit code.
+if [[ $HAD_ERRORS -ne 0 ]]; then
+exit 1
+fi
 
 # Execute: write to file or stdout
 if [[ ${#OUTPUT_FILES[@]} -gt 0 ]]; then

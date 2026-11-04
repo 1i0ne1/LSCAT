@@ -10,3 +10,7 @@ output*.txt
 .vscode/
 test_output.txt
 .idea/
+
+# gm/agentplug session state (runtime, derived)
+.gm/
+.agentplug-kv/
