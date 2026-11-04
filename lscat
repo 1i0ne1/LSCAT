@@ -1,12 +1,16 @@
 #!/bin/bash
 # =============================================================================
 # lscat - List and concatenate directory/file contents with advanced options
-# Version: 1.8.0 (FIXED: unquoted arguments just work — files given to -d
-# are processed like -f and directories given to -f list their immediate
-# files instead of being rejected, -de accepts values starting with "-"
-# like the documented default "---", -D targets are checked for
-# writability, binary files are skipped with a marker instead of dumping
-# raw bytes, glob fallbacks now respect -a)
+# Version: 1.8.1 (FIXED: dash-leading filenames work as -d/-f values and
+# through basename/cat/iconv, echo-flag swallowing in compression and
+# delimiters eliminated with printf, exact -f/-d duplicate paths
+# concatenated once, binary detection hardened with --)
+# 1.8.0: unquoted arguments just work - files given to -d processed like
+# -f and directories given to -f list their immediate files instead of
+# being rejected, -de accepts values starting with "-" like the
+# documented default "---", -D targets are checked for writability,
+# binary files are skipped with a marker instead of dumping raw bytes,
+# glob fallbacks respect -a
 # 1.7.7: -d "*" no longer repeats every nested subtree, -d "*" also
 # processes top-level files, deterministic C-sorted listings,
 # summary lines kept out of -D output files
@@ -16,7 +20,7 @@
 # License: Custom (see LICENSE file)
 # Repository: https://github.com/lionel-hue/LSCAT
 # =============================================================================
-VERSION="1.8.0"
+VERSION="1.8.1"
 SCRIPT_NAME=$(basename "$0")
 
 # Default values
