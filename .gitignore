@@ -14,3 +14,4 @@ test_output.txt
 # gm/agentplug session state (runtime, derived)
 .gm/
 .agentplug-kv/
+.freebuff/
