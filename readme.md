@@ -155,8 +155,8 @@ Files and directories **must** be specified with `-f` or `-d` flags. Positional 
 
 | Flag | Long form | Description |
 |------|-----------|-------------|
-| `-d DIR [DIR...]` | `--dir` | Directories to process. Supports patterns and multiple values. |
-| `-f FILE [FILE...]` | `--file` | Files to process (non-recursive, current directory by default). Supports glob patterns. |
+| `-d DIR [DIR...]` | `--dir` | Directories to process (recursive). Supports patterns and multiple values. Files given to `-d` are processed like `-f`, so unquoted globs work too. |
+| `-f FILE [FILE...]` | `--file` | Files to process (non-recursive). Supports glob patterns; directories given to `-f` contribute their immediate files. |
 | `-a` | `--all` | Include hidden files and directories (dotfiles). |
 
 **Special values for `-d`:**
@@ -182,7 +182,7 @@ Files and directories **must** be specified with `-f` or `-d` flags. Positional 
 | Flag | Long form | Description |
 |------|-----------|-------------|
 | `-D FILE` | `--destination` | Write output to this file (creates if missing, overwrites if present). Can be specified multiple times for multiple output files. |
-| `-de STR` | `--delimiter` | String printed between file contents. Default: `---` |
+| `-de STR` | `--delimiter` | String printed between file contents. Default: `---`. Values starting with `-` are accepted. |
 | `-l` | `--line-numbers` | Prefix each line of file content with its line number. |
 
 ### Compression
@@ -283,16 +283,20 @@ Strips all whitespace and collapses each file into a single continuous line. Int
 
 ## Pattern Matching
 
-`lscat` supports glob patterns in `-d`, `-f`, `-sd`, and `-sf` flags. Because the shell expands unquoted globs before passing them to the script, **always quote patterns**:
+`lscat` supports glob patterns in `-d`, `-f`, `-sd`, and `-sf` flags. Because the shell expands unquoted globs before passing them to the script, **quoting patterns is still recommended** so `lscat` can match them against the whole tree:
 
 ```bash
-# Good — lscat receives the literal pattern
+# Recommended — lscat receives the literal pattern
 lscat -f "*.md"
 lscat -d "migration*/"
 
-# Bad — the shell expands *.md before lscat sees it
+# Unquoted — also works since v1.8.0: whatever the shell expanded
+# (files and directories for -d / -f) is handled gracefully
 lscat -f *.md
+lscat -d *
 ```
+
+Binary files are detected and skipped with a `[binary file - skipped]` marker instead of dumping raw bytes into the output.
 
 ### How patterns are matched
 
