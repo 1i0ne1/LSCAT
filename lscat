@@ -376,7 +376,7 @@ seen_items[$dedup_key]=1
 unique_items+=("$item")
 done
 for item in "${unique_items[@]}"; do
-echo "$item"
+printf '%s\n' "$item"
 done
 }
 # Enhanced file pattern expansion function (FILES ONLY - non-recursive)
@@ -474,7 +474,7 @@ seen_items[$dedup_key]=1
 unique_items+=("$item")
 done
 for item in "${unique_items[@]}"; do
-echo "$item"
+printf '%s\n' "$item"
 done
 }
 
@@ -655,9 +655,9 @@ fi
 is_binary_file() {
 local f="$1"
 [[ -s "$f" ]] || return 1
-if grep -qI '' "$f" 2>/dev/null; then
+if grep -qI -e '' -- "$f" 2>/dev/null; then
 if command -v iconv > /dev/null 2>&1; then
-iconv -f UTF-8 -t UTF-8 "$f" > /dev/null 2>&1 || return 0
+iconv -f UTF-8 -t UTF-8 -- "$f" > /dev/null 2>&1 || return 0
 fi
 return 1
 fi
@@ -667,20 +667,20 @@ return 0
 compress_content() {
 local content="$1"
 if [[ "$COMPRESS" == false ]] && [[ "$COMPRESS_HARD" == false ]]; then
-echo "$content"
+printf '%s\n' "$content"
 return
 fi
 if [[ "$COMPRESS_HARD" == true ]]; then
 compress_hard_content "$content"
 return
 fi
-echo "$content" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d'
+printf '%s\n' "$content" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d'
 }
 
 compress_hard_content() {
 local content="$1"
-content=$(echo "$content" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
-content=$(echo "$content" | sed -e '/^$/d')
+content=$(printf '%s\n' "$content" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')
+content=$(printf '%s\n' "$content" | sed -e '/^$/d')
 local result=""
 local in_multiline_comment=false
 local regex_open='[\({\[<]'
@@ -711,11 +711,11 @@ else
 result="${line} "
 fi
 done <<< "$content"
-result=$(echo "$result" | sed -e 's/[[:space:]]*$//' -e 's/[[:space:]]\+/ /g')
+result=$(printf '%s\n' "$result" | sed -e 's/[[:space:]]*$//' -e 's/[[:space:]]\+/ /g')
 if [[ ${#result} -gt 1000 ]] && [[ "$WRITING_TO_FILE" == false ]]; then
 print_warning "Hard compression created very long line (${#result} chars)"
 fi
-echo "$result"
+printf '%s\n' "$result"
 }
 
 # =============================================================================
@@ -821,7 +821,7 @@ sh|bash) echo -e "${MAGENTA}$item_name${NC}" ;;
 py) echo -e "${YELLOW}$item_name${NC}" ;;
 js|ts) echo -e "${CYAN}$item_name${NC}" ;;
 md|txt) echo -e "${GREEN}$item_name${NC}" ;;
-*) echo "$item_name" ;;
+*) printf '%s\n' "$item_name" ;;
 esac
 else
 echo "$item_name"
@@ -916,7 +916,7 @@ sh|bash) echo -e "${item_indent}${MAGENTA}$item_name${NC}" ;;
 py) echo -e "${item_indent}${YELLOW}$item_name${NC}" ;;
 js|ts) echo -e "${item_indent}${CYAN}$item_name${NC}" ;;
 md|txt) echo -e "${item_indent}${GREEN}$item_name${NC}" ;;
-*) echo "${item_indent}$item_name" ;;
+*) printf '%s\n' "${item_indent}$item_name" ;;
 esac
 else
 echo "${item_indent}$item_name"
@@ -958,12 +958,12 @@ if is_binary_file "$file"; then
 print_warning "Binary file skipped: $file"
 [[ "$WRITING_TO_FILE" == false ]] && echo -e "\n${BOLD}File: ${CYAN}$file${NC}" || echo -e "\nFile: $file"
 echo "[binary file - skipped]"
-echo "${DELIMITER}"
+printf '%s\n' "${DELIMITER}"
 return
 fi
 
 [[ "$WRITING_TO_FILE" == false ]] && echo -e "\n${BOLD}File: ${CYAN}$file${NC}" || echo -e "\nFile: $file"
-echo "${DELIMITER}"
+printf '%s\n' "${DELIMITER}"
 
 local file_content
 file_content=$(cat "$file")
@@ -1091,12 +1091,12 @@ if is_binary_file "$file"; then
 print_warning "Binary file skipped: $file"
 [[ "$WRITING_TO_FILE" == false ]] && echo -e "${BOLD}File: ${CYAN}$file${NC}" || echo "File: $file"
 echo "[binary file - skipped]"
-echo "${DELIMITER}"
+printf '%s\n' "${DELIMITER}"
 return
 fi
 
 [[ "$WRITING_TO_FILE" == false ]] && echo -e "${BOLD}File: ${CYAN}$file${NC}" || echo "File: $file"
-echo "${DELIMITER}"
+printf '%s\n' "${DELIMITER}"
 
 local file_content=$(cat "$file")
 if [[ "$SHOW_LINE_NUMBERS" == true ]]; then
@@ -1144,28 +1144,28 @@ case "$arg" in
 -v|--version) print_version; exit 0 ;;
 -d|--dir)
 ((i++))
-while [[ $i -lt ${#ALL_ARGS[@]} ]] && [[ ! "${ALL_ARGS[$i]}" =~ ^- ]]; do
+while [[ $i -lt ${#ALL_ARGS[@]} ]] && ! is_known_option "${ALL_ARGS[$i]}"; do
 DIRECTORIES+=("${ALL_ARGS[$i]}"); ((i++))
 done; ((i--)) ;;
 -f|--file)
 ((i++))
-while [[ $i -lt ${#ALL_ARGS[@]} ]] && [[ ! "${ALL_ARGS[$i]}" =~ ^- ]]; do
+while [[ $i -lt ${#ALL_ARGS[@]} ]] && ! is_known_option "${ALL_ARGS[$i]}"; do
 FILES+=("${ALL_ARGS[$i]}"); ((i++))
 done; ((i--)) ;;
 -sd|--skip-dir)
 ((i++))
-while [[ $i -lt ${#ALL_ARGS[@]} ]] && [[ ! "${ALL_ARGS[$i]}" =~ ^- ]]; do
+while [[ $i -lt ${#ALL_ARGS[@]} ]] && ! is_known_option "${ALL_ARGS[$i]}"; do
 SKIP_DIRS+=("${ALL_ARGS[$i]}"); ((i++))
 done; ((i--)) ;;
 -sf|--skip-file)
 ((i++))
-while [[ $i -lt ${#ALL_ARGS[@]} ]] && [[ ! "${ALL_ARGS[$i]}" =~ ^- ]]; do
+while [[ $i -lt ${#ALL_ARGS[@]} ]] && ! is_known_option "${ALL_ARGS[$i]}"; do
 SKIP_FILES+=("${ALL_ARGS[$i]}"); ((i++))
 done; ((i--)) ;;
 -a|--all) INCLUDE_HIDDEN=true ;;
 -D|--destination)
 ((i++))
-while [[ $i -lt ${#ALL_ARGS[@]} ]] && [[ ! "${ALL_ARGS[$i]}" =~ ^- ]]; do
+while [[ $i -lt ${#ALL_ARGS[@]} ]] && ! is_known_option "${ALL_ARGS[$i]}"; do
 OUTPUT_FILES+=("${ALL_ARGS[$i]}"); ((i++))
 done; ((i--)) ;;
 -de|--delimiter)
@@ -1286,9 +1286,10 @@ done
 [[ "$contained" == true ]] || keep+=("$a")
 done
 for a in "${keep[@]}"; do
-echo "$a"
+printf '%s\n' "$a"
 done
 }
+
 if [[ ${#DIRECTORIES[@]} -gt 1 ]]; then
 mapfile -t DIRECTORIES < <(prune_contained_dirs "${DIRECTORIES[@]}")
 fi
@@ -1364,6 +1365,31 @@ else
 print_warning "File not found: $file (skipping)"
 fi
 done
+
+# Exactly the same path can reach the validated list twice ("-f root.md
+# -d root.md": the demotion adds it, -f adds it again) and would be
+# concatenated twice. Collapse canonical duplicates here. A file that
+# merely sits inside another listed directory is kept: re-including a
+# -sf-skipped file with -f is a legitimate request.
+_final_files=()
+declare -A _seen_final=()
+for file in "${VALID_FILES[@]}"; do
+_key="./${file#./}"
+[[ -n "${_seen_final[$_key]:-}" ]] && continue
+_seen_final[$_key]=1
+_final_files+=("$file")
+done
+VALID_FILES=("${_final_files[@]}")
+
+# Dash-leading paths ("-n flagfile.txt", "-x.txt", ...) given via -f/-d/--:
+# external helpers (basename, dirname, cat, iconv, ...) would otherwise eat
+# them as option flags. Prefix "./" so every filename is unambiguous.
+_dash_norm=()
+for file in "${VALID_FILES[@]}"; do
+[[ "$file" == -* ]] && file="./$file"
+_dash_norm+=("$file")
+done
+VALID_FILES=("${_dash_norm[@]}")
 
 # Stop on hard input errors so pipelines trust the exit code.
 if [[ $HAD_ERRORS -ne 0 ]]; then
