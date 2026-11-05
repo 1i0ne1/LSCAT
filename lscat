@@ -1,7 +1,7 @@
 #!/bin/bash
 # =============================================================================
 # lscat - List and concatenate directory/file contents with advanced options
-# Version: 1.8.1 (FIXED: dash-leading filenames work as -d/-f values and
+# Version: 1.8.2 (FIXED: explicit -d companions survive the wildcard prune and invalid paths keep reaching validation)
 # through basename/cat/iconv, echo-flag swallowing in compression and
 # delimiters eliminated with printf, exact -f/-d duplicate paths
 # concatenated once, binary detection hardened with --)
@@ -20,7 +20,7 @@
 # License: Custom (see LICENSE file)
 # Repository: https://github.com/lionel-hue/LSCAT
 # =============================================================================
-VERSION="1.8.1"
+VERSION="1.8.2"
 SCRIPT_NAME=$(basename "$0")
 
 # Default values
@@ -274,39 +274,46 @@ exit 0
 }
 
 # Enhanced pattern expansion function (DIRECTORIES ONLY - recursive)
+# Output is provenance-classified: "E <path>" for explicit values the user
+# asked for (must always survive to validation), "W <path>" for wildcard
+# matches. Only W items may be pruned as contained subtrees - "." is an
+# ancestor of every path, so an unclassified prune silently swallowed
+# explicit "-d ." companions (and dropped invalid -d values from
+# validation, breaking the exit-code contract).
 expand_patterns() {
 local items=("$@")
 local expanded_items=()
+local expanded_items_w=()
 for item in "${items[@]}"; do
 if [[ "$item" == "*" ]]; then
 if [[ "$INCLUDE_HIDDEN" == true ]]; then
 while IFS= read -r -d $'\0' found_item; do
 if [[ -d "$found_item" ]]; then
-expanded_items+=("$found_item")
+expanded_items_w+=("$found_item")
 fi
 done < <(find . -mindepth 1 -type d -print0 2>/dev/null)
 else
 while IFS= read -r -d $'\0' found_item; do
 if [[ -d "$found_item" ]] && [[ ! "$found_item" =~ /\. ]]; then
-expanded_items+=("$found_item")
+expanded_items_w+=("$found_item")
 fi
 done < <(find . -mindepth 1 -type d -not -name '.*' -print0 2>/dev/null)
 fi
 # "*" means the whole tree: also add "." so top-level files are processed
 # too (without this, files outside every subdirectory silently vanished
 # from -d "*" output — incl. a root README or package config).
-expanded_items+=(".")
+expanded_items_w+=(".")
 elif [[ "$item" == "." ]] && [[ "$POSITIONAL_DIRECTORIES" == false ]]; then
 expanded_items+=(".")
 elif [[ "$item" == ".*" ]]; then
 while IFS= read -r -d $'\0' found_item; do
 if [[ -d "$found_item" ]]; then
-expanded_items+=("$found_item")
+expanded_items_w+=("$found_item")
 fi
 done < <(find . -mindepth 1 -type d -name '.*' -print0 2>/dev/null)
 elif [[ "$item" == *"*"* ]] || [[ "$item" == *"?"* ]] || [[ "$item" == *"["* ]]; then
 if [[ -d "$item" ]]; then
-expanded_items+=("$item")
+expanded_items_w+=("$item")
 else
 shopt -s nullglob
 local found_items=()
@@ -353,7 +360,7 @@ fi
 fi
 fi
 for found_item in "${found_items[@]}"; do
-expanded_items+=("$found_item")
+expanded_items_w+=("$found_item")
 done
 fi
 else
@@ -367,9 +374,11 @@ done
 # Dedup via associative array keyed on the ./-stripped path: substring
 # matching (the old "${unique_items[@]}" regex) treated "dir" as a duplicate
 # of "test dir", and "./x" vs "x" forms of the same directory both survived,
-# getting processed twice.
+# getting processed twice. Explicit items win the kept-slot so ". dir"
+# style requests keep their better-recursive semantics.
 local -A seen_items=()
 local unique_items=()
+local unique_items_w=()
 local dedup_key
 for item in "${expanded_items[@]}"; do
 [[ -n "$item" ]] || continue
@@ -379,8 +388,19 @@ dedup_key="${dedup_key%/}"
 seen_items[$dedup_key]=1
 unique_items+=("$item")
 done
+for item in "${expanded_items_w[@]}"; do
+[[ -n "$item" ]] || continue
+dedup_key="${item#./}"
+dedup_key="${dedup_key%/}"
+[[ -n "${seen_items[$dedup_key]:-}" ]] && continue
+seen_items[$dedup_key]=1
+unique_items_w+=("$item")
+done
 for item in "${unique_items[@]}"; do
-printf '%s\n' "$item"
+printf 'E %s\n' "$item"
+done
+for item in "${unique_items_w[@]}"; do
+printf 'W %s\n' "$item"
 done
 }
 # Enhanced file pattern expansion function (FILES ONLY - non-recursive)
@@ -1225,9 +1245,18 @@ done
 # Expand patterns for directories and files
 if [[ ${#DIRECTORIES[@]} -gt 0 ]]; then
 temp_dirs=()
+wild_dirs=()
 for dir in "${DIRECTORIES[@]}"; do
-while IFS= read -r expanded_item; do
-[[ -n "$expanded_item" ]] && temp_dirs+=("$expanded_item")
+while IFS= read -r line; do
+[[ -n "$line" ]] || continue
+cls="${line%% *}"
+item="${line#* }"
+[[ -z "$item" ]] && continue
+if [[ "$cls" == "W" ]]; then
+wild_dirs+=("$item")
+else
+temp_dirs+=("$item")
+fi
 done < <(expand_patterns "$dir")
 done
 DIRECTORIES=("${temp_dirs[@]}")
@@ -1265,37 +1294,102 @@ if [[ ${#DIRECTORIES[@]} -gt 0 ]]; then
 mapfile -t DIRECTORIES < <(collapse_forms "${DIRECTORIES[@]}")
 fi
 
-# A root nested inside another root repeats its whole subtree: "-d *"
-# expands every descendant directory, so "docs" and "docs/deep" (and
-# "docs/deep/..." etc.) were each processed as a separate recursive root
-# and all their files were concatenated once per level. Keep only the
-# top-most roots; a recursive walk of a parent always covers its subdirs.
-prune_contained_dirs() {
-local -a keep=()
-local a b ka kb contained
+# A wildcard root nested inside another root repeats its whole subtree:
+# "-d *" expands every descendant directory, so "docs" and "docs/deep"
+# (and "docs/deep/..." etc.) were each processed as a separate recursive
+# root and all their files were concatenated once per level. Keep only
+# the top-most wildcard roots; a recursive walk of a parent always covers
+# its subdirs. Explicitly typed values are never pruned: they belong to
+# the user's request (their absent paths must reach validation and error
+# out instead of vanishing into rc 0), and "." as an ancestor of every
+# path may not swallow them.
+prune_wild_contained() {
+local first_explicit="$1"
+shift
+local -a wild=()
+local idx=0
+local a b ka kb
 for a in "$@"; do
+idx=$((idx + 1))
+[[ $idx -le $first_explicit ]] && continue
+wild+=("$a")
+done
+local -a keep=()
+for a in "${wild[@]}"; do
 ka="${a#./}"; ka="${ka%/}"
 [[ -z "$ka" ]] && ka="."
-contained=false
 for b in "$@"; do
-[[ "$a" == "$b" ]] && continue
 kb="${b#./}"; kb="${kb%/}"
 [[ -z "$kb" ]] && kb="."
-# "." is an ancestor of everything; contained paths are the literal subtree.
-if [[ "$kb" == "." ]] || [[ "$ka" == "$kb"/* ]]; then
-contained=true
-break
+if [[ "$a" == "$b" ]]; then
+continue
+fi
+if [[ "$ka" == "$kb" ]] || [[ "$kb" == "." ]] || [[ "$ka" == "$kb"/* ]]; then
+contained=true; break
 fi
 done
-[[ "$contained" == true ]] || keep+=("$a")
+[[ "${contained:-false}" == true ]] || keep+=("$a")
+unset contained
 done
 for a in "${keep[@]}"; do
 printf '%s\n' "$a"
 done
 }
 
+if [[ ${#wild_dirs[@]} -gt 0 ]]; then
+mapfile -t kept_wild < <(prune_wild_contained "${#DIRECTORIES[@]}" "${DIRECTORIES[@]}" "${wild_dirs[@]}")
+all_roots=("${DIRECTORIES[@]}" "${kept_wild[@]}")
+else
+all_roots=("${DIRECTORIES[@]}")
+fi
+
+# A recursive root already walks its whole subtree, so an explicit root
+# inside it would re-read every file it contains; drop those. A "." root
+# only covers its subtree when this run is recursive: "-d . src" must
+# keep src (top-only walk never reaches it), while "-d \"*\" src" must
+# drop it (the recursive "." walk already concatenated every src file).
+fold_already_covered() {
+local first_explicit="$1"
+shift
+local idx=0
+local a b ka kb covered
+local -a keep=()
+for a in "$@"; do
+idx=$((idx + 1))
+if [[ $idx -le $first_explicit ]]; then
+# An absent path cannot be "covered" by any walk: keeping it lets the
+# validation pass report it, instead of -d "* no/such/thing" exiting 0.
+[[ -d "$a" ]] || { keep+=("$a"); continue; }
+ka="${a#./}"; ka="${ka%/}"
+[[ -z "$ka" ]] && ka="."
+covered=false
+for b in "$@"; do
+kb="${b#./}"; kb="${kb%/}"
+[[ -z "$kb" ]] && kb="."
+[[ "$kb" == "$ka" ]] && continue
+if [[ "$kb" == "." && "$NON_RECURSIVE" == false ]]; then
+covered=true
+break
+elif [[ "$kb" != "." && "$ka" == "$kb"/* ]]; then
+covered=true
+break
+fi
+done
+[[ "$covered" == true ]] || keep+=("$a")
+else
+keep+=("$a")
+fi
+done
+for a in "${keep[@]}"; do
+printf '%s\n' "$a"
+done
+}
+
+if [[ ${#all_roots[@]} -gt 0 ]]; then
+mapfile -t DIRECTORIES < <(fold_already_covered "${#DIRECTORIES[@]}" "${all_roots[@]}")
+fi
 if [[ ${#DIRECTORIES[@]} -gt 1 ]]; then
-mapfile -t DIRECTORIES < <(prune_contained_dirs "${DIRECTORIES[@]}")
+mapfile -t DIRECTORIES < <(collapse_forms "${DIRECTORIES[@]}")
 fi
 if [[ ${#FILES[@]} -gt 0 ]]; then
 mapfile -t FILES < <(collapse_forms "${FILES[@]}")
