@@ -1,7 +1,7 @@
 #!/bin/bash
 # =============================================================================
 # lscat - List and concatenate directory/file contents with advanced options
-# Version: 1.8.2 (FIXED: explicit -d companions survive the wildcard prune and invalid paths keep reaching validation)
+# Version: 1.8.3 (FIXED: -d companion keep; "." root never skipped by -sd ".*"; hidden-dir prune leak under bare -d "*"; --help matches behavior)
 # through basename/cat/iconv, echo-flag swallowing in compression and
 # delimiters eliminated with printf, exact -f/-d duplicate paths
 # concatenated once, binary detection hardened with --)
@@ -20,7 +20,7 @@
 # License: Custom (see LICENSE file)
 # Repository: https://github.com/lionel-hue/LSCAT
 # =============================================================================
-VERSION="1.8.2"
+VERSION="1.8.3"
 SCRIPT_NAME=$(basename "$0")
 
 # Default values
@@ -78,12 +78,13 @@ echo -e "  ${BOLD}${Y}QUICK START${N}"
 echo -e "  ${D}──────────────────────────────────────────────${N}"
 echo -e "    ${C}lscat${N}                     ${D}# Tree of current directory${N}"
 echo -e "    ${C}lscat -d .${N}                ${D}# Same (explicit)${N}"
-echo -e "    ${C}lscat -d \"*\"${N}              ${D}# All directories recursively${N}"
+echo -e "    ${C}lscat -d \"*\"${N}              ${D}# Whole tree (top-level files included)${N}"
 echo -e "    ${C}lscat -f \"*\"${N}              ${D}# All files in current directory${N}"
 echo -e ""
 echo -e "  ${BOLD}${Y}INPUT OPTIONS${N}"
 echo -e "  ${D}──────────────────────────────────────────────${N}"
-echo -e "    ${G}-d, --dir${N}   ${W}DIR [DIR...]${N}    Directories to process (recursive)"
+echo -e "    ${G}-d, --dir${N}   ${W}DIR [DIR...]${N}    Directories to process; each walks recursively"
+echo -e "    ${D}                       \".\" is the top level only (non-recursive)${N}"
 echo -e "    ${G}-f, --file${N}  ${W}FILE [FILE...]${N}  Files to process (non-recursive)"
 echo -e "    ${G}-a, --all${N}                   Include hidden files and directories"
 echo -e ""
@@ -117,9 +118,14 @@ echo -e "    ${G}-i, --install${N}               Install lscat system-wide"
 echo -e "    ${G}-h, --help${N}                  Show this help message"
 echo -e "    ${G}-v, --version${N}               Show version info"
 echo -e ""
+echo -e "  ${BOLD}${Y}EXIT CODES${N}"
+echo -e "  ${D}──────────────────────────────────────────────${N}"
+echo -e "    ${D}missing -d dir:  exit 1 (hard error, validation is authoritative)${N}"
+echo -e "    ${D}missing -f file: warning, continues (still rc 0)${N}"
+echo -e ""
 echo -e "  ${BOLD}${Y}EXAMPLES${N}"
 echo -e "  ${D}──────────────────────────────────────────────${N}"
-echo -e "    ${C}lscat -d \"*\" -a -sd \".*\"${N}              ${D}# All dirs, skip hidden${N}"
+echo -e "    ${C}lscat -d \"*\" -a -sd \".*\"${N}              ${D}# Whole tree, hidden dirs out (-a keeps hidden files)${N}"
 echo -e "    ${C}lscat -f \"*.md\"${N}                        ${D}# All markdown files${N}"
 echo -e "    ${C}lscat -d . -sd node_modules -sd .git${N}   ${D}# Skip common noise dirs${N}"
 echo -e "    ${C}lscat -D out.txt -de \"***\" -d .${N}        ${D}# Custom delimiter, save to file${N}"
@@ -523,6 +529,7 @@ FIND_ARGS=(find "$base_dir")
 [[ -n "$maxdepth" ]] && FIND_ARGS+=($maxdepth)
 FIND_ARGS+=(-mindepth 1)
 
+local -a skip_expr=()
 local -a prune_expr=()
 
 for pattern in "${SKIP_DIRS[@]}"; do
@@ -530,18 +537,26 @@ for pattern in "${SKIP_DIRS[@]}"; do
     [[ -z "$pattern" ]] && continue
     local clean_pattern="${pattern#./}"
 
-    if [[ ${#prune_expr[@]} -gt 0 ]]; then
-        prune_expr+=(-o)
+    if [[ ${#skip_expr[@]} -gt 0 ]]; then
+        skip_expr+=(-o)
     fi
 
     if [[ "$pattern" == /* ]]; then
-        prune_expr+=(-path "$pattern")
+        skip_expr+=(-path "$pattern")
     elif [[ "$clean_pattern" == */* ]]; then
-        prune_expr+=(-path "*/${clean_pattern}")
+        skip_expr+=(-path "*/${clean_pattern}")
     else
-        prune_expr+=(-name "$clean_pattern")
+        skip_expr+=(-name "$clean_pattern")
     fi
 done
+
+# Explicit -sd patterns prune directories only: pruning files by name would
+# turn a dir-flag into a file filter (e.g. against hidden companion files
+# that -a asked for). The implicit hidden-exclusion prune below keeps its
+# name-based reach: hidden files are also excluded there unless -a.
+if [[ ${#skip_expr[@]} -gt 0 ]]; then
+    prune_expr+=("(" "${skip_expr[@]}" ")" -type d)
+fi
 
 if [[ "$include_hidden" == false ]] && [[ "$is_hidden_parent" == false ]]; then
     if [[ ${#prune_expr[@]} -gt 0 ]]; then
@@ -755,7 +770,10 @@ local recursive="${4:-true}"
 local parent_is_hidden="${5:-false}"
 local force_show_hidden="${6:-false}"
 
-if should_skip_dir "$dir"; then
+# "." is the walk anchor itself: a skip pattern like .* must prune its
+# children, never silence the whole root (the help's own example relies
+# on this). Explicit non-"." roots keep their skip semantics.
+if [[ "$dir" != "." ]] && should_skip_dir "$dir"; then
 if [[ $depth -eq 0 ]]; then
 [[ "$WRITING_TO_FILE" == false ]] && echo -e "${YELLOW}📁 $dir (skipped)${NC}" || echo "📁 $dir (skipped)"
 else
@@ -867,7 +885,7 @@ local recursive="${3:-true}"
 local parent_is_hidden="${4:-false}"
 local force_show_hidden="${5:-false}"
 
-if should_skip_dir "$dir"; then
+if [[ "$dir" != "." ]] && should_skip_dir "$dir"; then
 if [[ $depth -eq 0 ]]; then
 [[ "$WRITING_TO_FILE" == false ]] && echo -e "${YELLOW}📁 $dir (skipped)${NC}" || echo "📁 $dir (skipped)"
 fi
@@ -1015,9 +1033,16 @@ local dir="$1"
 local dir_name=$(basename "$dir")
 local is_dir_hidden=false
 [[ "$dir_name" == .* ]] && is_dir_hidden=true
+# "." is never treated as a hidden parent: it basename-matches ".*", which
+# (as is_hidden_parent) suppressed the implicit hidden-prune leg of the
+# find composition and leaked files of un-named hidden dirs (.cache/* under
+# bare -d "*").
+[[ "$dir" == "." ]] && is_dir_hidden=false
 local force_show_hidden="${2:-false}"
 
-if should_skip_dir "$dir"; then
+# "." is the walk anchor itself: skip patterns prune this root's children
+# (should_skip_dir at the item level), never the root's own listing.
+if [[ "$dir" != "." ]] && should_skip_dir "$dir"; then
 print_info "Skipping entire directory: $dir"
 return
 fi
